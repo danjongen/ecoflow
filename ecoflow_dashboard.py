@@ -153,11 +153,16 @@ if logo.exists() and pin.exists():
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 elif logo.exists():
     st.image(str(logo), use_container_width=True)
-    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True))
+    # <-- removed the extra ')' here
+    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
-st.markdown("<h1 style='text-align:center;color:#eee;margin-bottom:8px;'>UFO PDU STATUS</h1>", unsafe_allow_html=True)
-st.markdown("<style>body{background:#111;} th,td{font-size:14px;}</style>", unsafe_allow_html=True)
+st.markdown(
+    "<h1 style='text-align:center;color:#eee;margin-bottom:8px;'>UFO PDU STATUS</h1>",
+    unsafe_allow_html=True
+)
+st.markdown("<style>body{background:#111;} th,td{font-size:14px;}</style>",
+            unsafe_allow_html=True)
 
 def badge():
     if DEMO:
@@ -180,8 +185,10 @@ def render():
         card("Leg-1 kW", data["l1"], red=LEG_RED, orange=LEG_ORG)
         card("Leg-2 kW", data["l2"], red=LEG_RED, orange=LEG_ORG)
         card("Δ Leg kW", abs(data["l1"]-data["l2"]), red=LEG_RED, orange=LEG_ORG)
-        card(f"Inv °F (shut {c2f(INV_SHUT):.0f})", c2f(data["inv"]), red=c2f(INV_RED), orange=c2f(INV_ORG), fmt="{:.0f}")
-        card(f"Bat °F (shut {c2f(BAT_SHUT):.0f})", c2f(data["bat"]), red=c2f(BAT_RED), orange=c2f(BAT_ORG), fmt="{:.0f}")
+        card(f"Inv °F (shut {c2f(INV_SHUT):.0f})", c2f(data["inv"]),
+             red=c2f(INV_RED), orange=c2f(INV_ORG), fmt="{:.0f}")
+        card(f"Bat °F (shut {c2f(BAT_SHUT):.0f})", c2f(data["bat"]),
+             red=c2f(BAT_RED), orange=c2f(BAT_ORG), fmt="{:.0f}")
 
     leg1 = [{**d, "slot":i} for i,d in data["brk"].items() if d["leg"]==1]
     leg2 = [{**d, "slot":i} for i,d in data["brk"].items() if d["leg"]==2]
@@ -212,14 +219,19 @@ def render():
 
     c1,c2 = right.columns([2,1])
     if data["brk"]:
-        top = (pd.DataFrame(data["brk"]).T.sort_values("kw", ascending=False).head(5).reset_index())
+        top = (pd.DataFrame(data["brk"]).T.sort_values("kw", ascending=False)
+                    .head(5).reset_index())
         top["col"] = top["kw"].apply(
-            lambda x: EDGE["red"] if x>=BRK_RED else EDGE["orange"] if x>=BRK_ORG else EDGE["gray"])
-        chart = (alt.Chart(top).mark_bar().encode(
-            x=alt.X("kw:Q", title="kW", scale=alt.Scale(domain=[0, BRK_RED+0.5])),
-            y=alt.Y("name:N", sort="-x", title=None),
-            color=alt.Color("col:N", scale=None, legend=None)
-        ).properties(height=180))
+            lambda x: EDGE["red"] if x>=BRK_RED
+                      else EDGE["orange"] if x>=BRK_ORG
+                      else EDGE["gray"])
+        chart = (alt.Chart(top)
+                 .mark_bar()
+                 .encode(
+                     x=alt.X("kw:Q", title="kW", scale=alt.Scale(domain=[0, BRK_RED+0.5])),
+                     y=alt.Y("name:N", sort="-x", title=None),
+                     color=alt.Color("col:N", scale=None, legend=None)
+                 ).properties(height=180))
         c1.subheader("Top breakers kW")
         c1.altair_chart(chart, use_container_width=True)
 
@@ -229,7 +241,8 @@ def render():
             c2.markdown(f"`{ts:%H:%M:%S}` {msg}")
 
 # ───────── Launch ───────────────────────────────────────────────────────────
-threading.Thread(target=(demo_loop if DEMO else mqtt_loop), daemon=True).start()
+threading.Thread(target=(demo_loop if DEMO else mqtt_loop),
+                 daemon=True).start()
 
 while True:
     render()
