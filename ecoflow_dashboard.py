@@ -152,7 +152,8 @@ if logo.exists() and pin.exists():
     c2.image(str(pin),  width=400)
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 elif logo.exists():
-    st.image(str(logo), use_column_width=True)
+    st.image(str(logo), use_container_width=True)
+    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True))
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
 st.markdown("<h1 style='text-align:center;color:#eee;margin-bottom:8px;'>UFO PDU STATUS</h1>", unsafe_allow_html=True)
