@@ -7,6 +7,7 @@ import json
 import threading
 import pathlib
 from datetime import datetime
+import traceback
 
 import streamlit as st
 import pandas as pd
@@ -62,7 +63,8 @@ DEVICESN  = "HD31ZAS4HGC70401"
 lock = threading.Lock()
 state = {
     "soc":0, "l1":0, "l2":0, "shore":True, "grid":0,
-    "mins":0, "inv":0, "bat":0, "brk":{}, "events":[], "last":None
+    "mins":0, "inv":0, "bat":0, "brk":{}, "events":[], "last":None,
+    "error": None,
 }
 peaks = {i:0.0 for i in range(1,13)}
 
@@ -105,10 +107,14 @@ def on_packet(params):
 def on_mqtt_connect(client, userdata, flags, rc):
     if rc == 0:
         log_event("✅ MQTT connected")
+        with lock:
+            state["error"] = None
         topic = f"open/{ACCESSKEY}/{DEVICESN}/status"
         client.subscribe(topic, qos=0)
     else:
         log_event(f"❌ MQTT conn fail, rc={rc}")
+        with lock:
+            state["error"] = f"Connect RC={rc}"
 
 def mqtt_start():
     """Spawn an MQTT client that feeds state via on_packet()."""
@@ -117,10 +123,16 @@ def mqtt_start():
         client.username_pw_set(ACCESSKEY, SECRETKEY)
         client.tls_set()
         client.on_connect = on_mqtt_connect
-        client.on_message = lambda c, u, m: on_packet(json.loads(m.payload)["params"])
+        client.on_message = lambda c, u, m: (
+            log_event(f"📥 raw: {m.payload!r}"),
+            on_packet(json.loads(m.payload)["params"])
+        )
         client.connect(BROKER, 8883)
         client.loop_start()
     except Exception as e:
+        err = traceback.format_exc()
+        with lock:
+            state["error"] = err
         log_event(f"❌ MQTT exception: {e}")
 
 # Launch it once (in its own daemon thread):
@@ -175,6 +187,10 @@ def render():
         f"**Panel status:** `<span style='color:{color}'>{status}</span>`",
         unsafe_allow_html=True
     )
+
+    # show any connection error
+    if data.get("error"):
+        st.error("MQTT Error:\n" + data["error"])
 
     # split into two columns
     left, right = st.columns([1,3], gap="large")
