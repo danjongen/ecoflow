@@ -1,3 +1,30 @@
+import os
+import streamlit as st
+
+# ──────────────── IMAGE LOADING ─────────────────
+# Figure out where the dashboard script lives:
+HERE = os.path.dirname(__file__)
+
+# Build absolute paths to your two PNGs:
+HEADER1 = os.path.join(HERE, "header.png")
+HEADER2 = os.path.join(HERE, "into_the_millennium.png")
+
+# Display them side-by-side with a little padding column in the middle:
+cols = st.columns([1,2,1])
+with cols[0]:
+    if os.path.isfile(HEADER1):
+        st.image(HEADER1, use_column_width=True)
+    else:
+        st.warning("⚠️ header.png not found")
+with cols[2]:
+    if os.path.isfile(HEADER2):
+        st.image(HEADER2, use_column_width=True)
+    else:
+        st.warning("⚠️ into_the_millennium.png not found")
+
+st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+
+
 import streamlit as st
 import paho.mqtt.client as mqtt
 import threading, time, json
