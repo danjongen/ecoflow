@@ -142,9 +142,9 @@ def demo_loop():
             update_peak(i, d["kw"])
         time.sleep(1)
 ()
-    start = time.time()
-    log_event("Demo started")
-    while True:
+start = time.time()
+log_event("Demo started")
+while True:
         t = time.time()-start
         tot = 6 + 2*math.sin(t/9) + 0.6*random.random()
         l1 = tot*(0.5+random.uniform(-.12,.12))
