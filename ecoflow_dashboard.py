@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 ################################################################################
-# UFO PDU STATUS · v2.0  (all‐in‐one, dark‐mode, hard‐coded creds, auto‐update)  #
+# UFO PDU STATUS · v2.0  (all-in-one, dark-mode, hard-coded creds, auto-update)   #
 ################################################################################
 
-import os
 import json
-import time
 import threading
 import pathlib
 from datetime import datetime
@@ -55,7 +53,6 @@ EDGE = dict(red="#e74c3c", orange="#f39c12", green="#27ae60",
 CARD_BG = "#1a1a1a"
 
 # ───────── Hard-coded Live credentials ───────────────────────────────────────
-# Replace these with your real values:
 BROKER    = "mqtt-e.ecoflow.com"
 ACCESSKEY = "Tf9MP4iMBbymFIbVXQKArJd1IreqXDZt"
 SECRETKEY = "upmnU2HTFRuVuBkXTIRtCq6NgYBTaTB2"
@@ -90,14 +87,14 @@ def on_packet(params):
     """Called for each incoming MQTT message JSON→update state."""
     with lock:
         state.update(
-            soc   = params.get("soc",   state["soc"]),
-            l1    = params.get("l1",    state["l1"]),
-            l2    = params.get("l2",    state["l2"]),
-            shore = params.get("shore", state["shore"]),
-            grid  = params.get("grid",  state["grid"]),
-            inv   = params.get("invt",  state["inv"]),
-            bat   = params.get("batt",  state["bat"]),
-            brk   = params.get("breakers", state["brk"]),
+            soc   = params.get("soc",    state["soc"]),
+            l1    = params.get("l1",     state["l1"]),
+            l2    = params.get("l2",     state["l2"]),
+            shore = params.get("shore",  state["shore"]),
+            grid  = params.get("grid",   state["grid"]),
+            inv   = params.get("invt",   state["inv"]),
+            bat   = params.get("batt",   state["bat"]),
+            brk   = params.get("breakers",state["brk"]),
             last  = datetime.now(),
         )
         recalc_minutes()
@@ -126,12 +123,12 @@ def mqtt_start():
     except Exception as e:
         log_event(f"❌ MQTT exception: {e}")
 
-# Launch it once:
+# Launch it once (in its own daemon thread):
 threading.Thread(target=mqtt_start, daemon=True).start()
 
 # ───────── Card renderer ─────────────────────────────────────────────────────
 def card(label, val, unit="", red=None, orange=None, fmt="{:.1f}"):
-    """Draw one of the left‐hand metric cards."""
+    """Draw one of the left-hand metric cards."""
     edge = EDGE["green"]
     if red    is not None and val >= red:    edge = EDGE["red"]
     if orange is not None and val >= orange: edge = EDGE["orange"]
@@ -149,7 +146,7 @@ def card(label, val, unit="", red=None, orange=None, fmt="{:.1f}"):
 
 # ───────── Load & show logos ─────────────────────────────────────────────────
 logo = BASE / "header.png"
-pin  = BASE / "into_the_millennium.png"
+pin  = BASE / "into_the_millenium.png"
 
 if logo.exists() and pin.exists():
     c1, c2 = st.columns(2, gap="large")
@@ -174,7 +171,10 @@ def render():
     # ONLINE/OFFLINE badge
     status = "ONLINE" if data["last"] else "OFFLINE"
     color  = "#2ecc71" if data["last"] else "#e74c3c"
-    st.markdown(f"**Panel status:** `<span style='color:{color}'>{status}</span>`", unsafe_allow_html=True)
+    st.markdown(
+        f"**Panel status:** `<span style='color:{color}'>{status}</span>`",
+        unsafe_allow_html=True
+    )
 
     # split into two columns
     left, right = st.columns([1,3], gap="large")
@@ -193,7 +193,7 @@ def render():
              red=c2f(BAT_RED), orange=c2f(BAT_ORG), fmt="{:.0f}")
 
     # Right: breaker tables + chart + log
-    def make_table(rows, legno):
+    def make_table(rows):
         df = pd.DataFrame(rows)
         if df.empty:
             st.write("No data")
@@ -216,6 +216,7 @@ def render():
                   }]))
         st.dataframe(styled, height=260, use_container_width=True)
 
+    # freshness badge
     hb = "<span style='color:#fff;background:#444;padding:3px 6px;border-radius:4px;'>no data</span>"
     if data["last"]:
         age = (datetime.now()-data["last"]).total_seconds()
@@ -227,10 +228,10 @@ def render():
     leg2 = [{**d,"slot":i} for i,d in data["brk"].items() if d.get("leg")==2]
 
     t1, t2 = right.columns(2, gap="medium")
-    t1.markdown(f"### Leg 1  {hb}", unsafe_allow_html=True)
-    make_table(leg1,1)
-    t2.markdown(f"### Leg 2  {hb}", unsafe_allow_html=True)
-    make_table(leg2,2)
+    t1.markdown(f"### Leg 1 {hb}", unsafe_allow_html=True)
+    make_table(leg1)
+    t2.markdown(f"### Leg 2 {hb}", unsafe_allow_html=True)
+    make_table(leg2)
 
     # bottom: top breakers chart + log
     c1, c2 = right.columns([2,1], gap="medium")
@@ -249,14 +250,14 @@ def render():
             color=alt.Color("col:N",scale=None,legend=None)
         ).properties(height=180))
         c1.subheader("Top breakers")
-        c1.altair_chart(chart,use_container_width=True)
+        c1.altair_chart(chart, use_container_width=True)
     else:
         c1.write("No breaker data")
 
     # event log
     c2.subheader("Event log")
-    for ts,msg in data["events"]:
+    for ts, msg in data["events"]:
         c2.markdown(f"`{ts:%H:%M:%S}`  {msg}")
 
-# ───────── Finally, render on load ───────────────────────────────────────────
+# ───────── Launch ────────────────────────────────────────────────────────────
 render()
