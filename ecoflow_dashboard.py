@@ -1,5 +1,6 @@
+#!/usr/bin/env python3
 ################################################################################
-#  UFO PDU STATUS · v1.8c  (complete file – ready to run, dark‐mode + robust)
+#  UFO PDU STATUS · v1.9 (live‐only, with ONLINE/OFFLINE status banner)
 ################################################################################
 import os, json, time, threading, math, random, pathlib
 from datetime import datetime
@@ -30,26 +31,26 @@ CARD_BG = "#1a1a1a"
 lock = threading.Lock()
 state = {
     "soc":0, "l1":0, "l2":0, "grid":0, "shore":True,
-    "mins":0, "inv":0, "bat":0, "brk":{}, "events":[], "last":None
+    "mins":0, "inv":0, "bat":0, "brk":{}, "events":[], "last":None,
+    "connected": False
 }
 peaks = {i:0 for i in range(1,13)}
 
-# ───────── Sidebar (demo vs live setup) ─────────────────────────────────────
+# ───────── Sidebar (live‐only setup) ─────────────────────────────────────────
 with st.sidebar:
-    st.header("Run mode")
-    DEMO = st.checkbox("Demo mode", value=True)
-    if not DEMO:
-        broker = st.text_input("Broker", "mqtt-e.ecoflow.com")
-        akey   = st.text_input("AccessKey")
-        skey   = st.text_input("SecretKey", type="password")
-        sn     = st.text_input("Device SN")
-        if st.button("Connect / Update"):
-            if akey and skey and sn:
-                st.session_state.live = dict(
-                    broker=broker, akey=akey, skey=skey, sn=sn
-                )
-            st.rerun()
-cfg = st.session_state.get("live", {}) if not DEMO else {}
+    st.header("Live mode credentials")
+    broker = st.text_input("Broker",    "mqtt-e.ecoflow.com")
+    akey   = st.text_input("AccessKey")
+    skey   = st.text_input("SecretKey", type="password")
+    sn     = st.text_input("Device SN")
+    if st.button("Connect / Update"):
+        if akey and skey and sn:
+            st.session_state.live = dict(
+                broker=broker, akey=akey, skey=skey, sn=sn
+            )
+        st.rerun()
+
+cfg = st.session_state.get("live", {})
 
 # ───────── Helpers ───────────────────────────────────────────────────────────
 def card(lbl, val, u="", *, red=None, orange=None, fmt="{:.1f}"):
@@ -83,91 +84,55 @@ def update_peak(i,v):
     with lock:
         peaks[i] = max(peaks[i], v)
 
-# ───────── Data callbacks ────────────────────────────────────────────────────
-
+# ───────── MQTT callbacks & loop ─────────────────────────────────────────────
 def on_mqtt_connect(client, userdata, flags, rc):
-    # MQTT connect callback
     if rc == 0:
+        state["connected"] = True
         log_event("✅ MQTT connected!")
-        # subscribe once connected
         client.subscribe(f"open/{cfg['akey']}/{cfg['sn']}/status", qos=0)
     else:
+        state["connected"] = False
         log_event(f"❌ MQTT connection failed, code={rc}")
 
+def on_mqtt_disconnect(client, userdata, rc):
+    state["connected"] = False
+    log_event(f"⚠️ MQTT disconnected (code={rc})")
+
+def on_packet(p):
+    # incoming status payload handling
+    with lock:
+        state.update(
+            soc   = p.get("soc", state["soc"]),
+            grid  = p.get("grid", state["grid"]),
+            shore = p.get("shore", state["shore"]),
+            inv   = p.get("invTemp", state["inv"]),
+            bat   = p.get("batTemp", state["bat"]),
+            l1    = p.get("l1Power", state["l1"]),
+            l2    = p.get("l2Power", state["l2"]),
+            brk   = p.get("breakerStatus", state["brk"]),
+            last  = datetime.now()
+        )
+        recalc_minutes()
+        for i,d in state["brk"].items():
+            update_peak(i, d.get("kw", 0))
 
 def mqtt_loop():
-    # If live credentials are missing, stay idle
     if not (cfg.get("akey") and cfg.get("skey") and cfg.get("sn")):
-        log_event("⚠️ Live credentials missing – staying idle")
+        log_event("⚠️ Missing credentials – idle")
         return
-
     client = mqtt.Client()
     client.username_pw_set(cfg["akey"], cfg["skey"])
-    client.tls_set()  # default TLS certs
-    client.on_connect = on_mqtt_connect
-    client.on_message = lambda c, u, m: on_packet(json.loads(m.payload)["params"])
-
+    client.tls_set()
+    client.on_connect    = on_mqtt_connect
+    client.on_disconnect = on_mqtt_disconnect
+    client.on_message    = lambda c,u,m: on_packet(json.loads(m.payload)["params"])
     try:
         client.connect(cfg["broker"], 8883)
-        # start the loop in background
         client.loop_start()
     except Exception as e:
         log_event(f"❌ MQTT connect exception: {e}")
 
-
-def demo_loop():
-    start = time.time()
-    log_event("Demo started")
-    while True:
-        t = time.time() - start
-        tot = 6 + 2*math.sin(t/9) + 0.6*random.random()
-        l1 = tot*(0.5 + random.uniform(-.12, .12))
-        l2 = tot - l1
-        brk = {i: dict(
-                    name=f"B{i}", amps=random.uniform(0,2),
-                    kw=random.uniform(0,.28), leg=1 if i%2 else 2
-                ) for i in range(1,13)}
-        brk[3]["kw"] = random.uniform(1.8,2.2)
-        brk[3]["amps"] = brk[3]["kw"] * 4.16
-        with lock:
-            state.update(
-                soc  = max(3, 85 - t/140),
-                l1   = l1, l2 = l2,
-                grid = 0, shore=False,
-                inv  = random.uniform(30,60), bat = random.uniform(25,50),
-                brk  = brk, last = datetime.now()
-            )
-            recalc_minutes()
-        for i, d in brk.items():
-            update_peak(i, d["kw"])
-        time.sleep(1)
-
-def demo_loop():
-    start = time.time()
-    log_event("Demo started")
-    while True:
-        t = time.time()-start
-        tot = 6 + 2*math.sin(t/9) + 0.6*random.random()
-        l1 = tot*(0.5+random.uniform(-.12,.12))
-        l2 = tot-l1
-        brk = {i: dict(
-                    name=f"B{i}", amps=random.uniform(0,2),
-                    kw=random.uniform(0,.28), leg=1 if i%2 else 2
-                ) for i in range(1,13)}
-        brk[3]["kw"] = random.uniform(1.8,2.2)
-        brk[3]["amps"] = brk[3]["kw"]*4.16
-        with lock:
-            state.update(
-                soc  = max(3,85-t/140),
-                l1   = l1, l2 = l2, grid = 0, shore=False,
-                inv  = random.uniform(30,60), bat  = random.uniform(25,50),
-                brk  = brk, last = datetime.now()
-            )
-            recalc_minutes()
-        for i,d in brk.items(): update_peak(i,d["kw"])
-        time.sleep(1)
-
-# ───────── Page header ──────────────────────────────────────────────────────
+# ───────── Page header & status banner ──────────────────────────────────────
 st.set_page_config("UFO PDU", layout="wide", initial_sidebar_state="collapsed")
 logo = BASE/"header.png"; pin = BASE/"into the millennium.png"
 if logo.exists() and pin.exists():
@@ -178,38 +143,44 @@ if logo.exists() and pin.exists():
 elif logo.exists():
     st.image(str(logo), use_container_width=True)
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
-    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
-st.markdown("<h1 style='text-align:center;color:#eee;margin-bottom:8px;'>UFO PDU STATUS</h1>", unsafe_allow_html=True)
-st.markdown("<style>body{background:#111;} th,td{font-size:14px;}</style>", unsafe_allow_html=True)
+# ONLINE/OFFLINE banner
+status_col = EDGE["green"] if state["connected"] else EDGE["red"]
+st.markdown(
+    f"<p style='text-align:center;color:{status_col};"
+    f"font-size:18px;margin-bottom:12px;'>"
+    f"Panel status: {'ONLINE' if state['connected'] else 'OFFLINE'}"
+    "</p>",
+    unsafe_allow_html=True
+)
 
-def badge():
-    if DEMO:
-        return "<span style='background:#3498db;color:#fff;padding:2px 6px;border-radius:4px'>DEMO</span>"
-    if state["last"] is None:
-        return "<span style='background:#7f8c8d;color:#fff;padding:2px 6px;border-radius:4px'>no&nbsp;data</span>"
-    age = (datetime.now()-state["last"]).total_seconds()
-    col = EDGE["green"] if age<10 else EDGE["orange"] if age<30 else EDGE["red"]
-    return f"<span style='background:{col};color:#fff;padding:2px 6px;border-radius:4px'>{age:.0f}s</span>"
+st.markdown(
+    "<h1 style='text-align:center;color:#eee;margin-bottom:8px;'>UFO PDU STATUS</h1>"
+    "<style>body{background:#111;} th,td{font-size:14px;}</style>",
+    unsafe_allow_html=True
+)
 
 # ───────── Render UI ────────────────────────────────────────────────────────
 def render():
     with lock: data = state.copy()
     left,right = st.columns([1,3], gap="large")
 
+    # left‐hand cards
     with left:
         card("Shore kW", data["grid"])
-        card("SoC %", data["soc"], fmt="{:.1f}")
+        card("SoC %",   data["soc"], fmt="{:.1f}")
         card("Empty min", data["mins"], fmt="{:.1f}")
         card("Leg-1 kW", data["l1"], red=LEG_RED, orange=LEG_ORG)
         card("Leg-2 kW", data["l2"], red=LEG_RED, orange=LEG_ORG)
         card("Δ Leg kW", abs(data["l1"]-data["l2"]), red=LEG_RED, orange=LEG_ORG)
-        card(f"Inv °F (shut {c2f(INV_SHUT):.0f})", c2f(data["inv"]), red=c2f(INV_RED), orange=c2f(INV_ORG), fmt="{:.0f}")
-        card(f"Bat °F (shut {c2f(BAT_SHUT):.0f})", c2f(data["bat"]), red=c2f(BAT_RED), orange=c2f(BAT_ORG), fmt="{:.0f}")
+        card(f"Inv °F (shut {c2f(INV_SHUT):.0f})", c2f(data["inv"]),
+             red=c2f(INV_RED), orange=c2f(INV_ORG), fmt="{:.0f}")
+        card(f"Bat °F (shut {c2f(BAT_SHUT):.0f})", c2f(data["bat"]),
+             red=c2f(BAT_RED), orange=c2f(BAT_ORG), fmt="{:.0f}")
 
-    leg1 = [{**d, "slot":i} for i,d in data["brk"].items() if d["leg"]==1]
-    leg2 = [{**d, "slot":i} for i,d in data["brk"].items() if d["leg"]==2]
-
+    # breaker tables
+    leg1 = [{**d,"slot":i} for i,d in data["brk"].items() if d.get("leg")==1]
+    leg2 = [{**d,"slot":i} for i,d in data["brk"].items() if d.get("leg")==2]
     def tbl(rows):
         df = pd.DataFrame(rows)
         if df.empty:
@@ -227,18 +198,22 @@ def render():
                     .apply(style_row, axis=1)
                     .set_table_styles([{"selector":"th","props":"background:#333;color:#ddd;"}]))
 
-    hb = badge()
+    hb = ""  # no per‐table badge needed now that we have a global status
     t1,t2 = right.columns(2)
-    t1.markdown(f"### Leg 1 {hb}", unsafe_allow_html=True)
+    t1.markdown("### Leg 1", unsafe_allow_html=True)
     t1.dataframe(tbl(leg1), height=280, use_container_width=True)
-    t2.markdown(f"### Leg 2 {hb}", unsafe_allow_html=True)
+    t2.markdown("### Leg 2", unsafe_allow_html=True)
     t2.dataframe(tbl(leg2), height=280, use_container_width=True)
 
+    # top‐breakers chart + event log
     c1,c2 = right.columns([2,1])
     if data["brk"]:
-        top = (pd.DataFrame(data["brk"]).T.sort_values("kw", ascending=False).head(5).reset_index())
+        top = (pd.DataFrame(data["brk"]).T
+               .sort_values("kw", ascending=False).head(5).reset_index())
         top["col"] = top["kw"].apply(
-            lambda x: EDGE["red"] if x>=BRK_RED else EDGE["orange"] if x>=BRK_ORG else EDGE["gray"])
+            lambda x: EDGE["red"] if x>=BRK_RED
+                      else EDGE["orange"] if x>=BRK_ORG
+                      else EDGE["gray"])
         chart = (alt.Chart(top).mark_bar().encode(
             x=alt.X("kw:Q", title="kW", scale=alt.Scale(domain=[0, BRK_RED+0.5])),
             y=alt.Y("name:N", sort="-x", title=None),
@@ -252,12 +227,10 @@ def render():
         for ts,msg in data["events"]:
             c2.markdown(f"`{ts:%H:%M:%S}` {msg}")
 
-# ───────── Launch ───────────────────────────────────────────────────────────
-threading.Thread(target=(demo_loop if DEMO else mqtt_loop), daemon=True).start()
+# ───────── Start MQTT thread + loop ─────────────────────────────────────────
+threading.Thread(target=mqtt_loop, daemon=True).start()
 
 while True:
     render()
     time.sleep(1)
     st.rerun()
-
-
