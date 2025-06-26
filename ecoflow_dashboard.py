@@ -1,237 +1,183 @@
-#!/usr/bin/env python3
-################################################################################
-#  UFO PDU STATUS · v1.9 (live‐only, with ONLINE/OFFLINE status banner)
-################################################################################
-import os, json, time, threading, math, random, pathlib
-from datetime import datetime
-import streamlit as st, pandas as pd, altair as alt
+import streamlit as st
 import paho.mqtt.client as mqtt
+import threading, time, json
+from datetime import datetime
 
-# ───────── Ensure dark theme via .streamlit/config.toml ─────────────────────
-# (create .streamlit/config.toml with:
-#   [theme]
-#   base = "dark"
-#)
+# ─── PAGE SETUP ────────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="UFO PDU Status",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-# ───────── Base path for images ─────────────────────────────────────────────
-BASE = pathlib.Path(__file__).parent
-
-# ───────── Config ────────────────────────────────────────────────────────────
-USABLE_WH       = float(os.getenv("USABLE_WH", "11000"))
-INV_SHUT,INV_RED,INV_ORG = 65, 55, 45
-BAT_SHUT,BAT_RED,BAT_ORG = 55, 45, 35
-LEG_RED,LEG_ORG = 6.0, 5.0
-BRK_RED,BRK_ORG = 2.0, 1.5
-c2f = lambda c: c*9/5 + 32
-EDGE = dict(red="#e74c3c", orange="#f39c12", green="#27ae60",
-            blue="#3498db", gray="#2e2e2e")
-CARD_BG = "#1a1a1a"
-
-# ───────── Global state ──────────────────────────────────────────────────────
-lock = threading.Lock()
-state = {
-    "soc":0, "l1":0, "l2":0, "grid":0, "shore":True,
-    "mins":0, "inv":0, "bat":0, "brk":{}, "events":[], "last":None,
-    "connected": False
-}
-peaks = {i:0 for i in range(1,13)}
-
-# ───────── Sidebar (live‐only setup) ─────────────────────────────────────────
-with st.sidebar:
-    st.header("Live mode credentials")
-    broker = st.text_input("Broker",    "mqtt-e.ecoflow.com")
-    akey   = st.text_input("AccessKey")
-    skey   = st.text_input("SecretKey", type="password")
-    sn     = st.text_input("Device SN")
-    if st.button("Connect / Update"):
-        if akey and skey and sn:
-            st.session_state.live = dict(
-                broker=broker, akey=akey, skey=skey, sn=sn
-            )
-        st.rerun()
-
-cfg = st.session_state.get("live", {})
-
-# ───────── Helpers ───────────────────────────────────────────────────────────
-def card(lbl, val, u="", *, red=None, orange=None, fmt="{:.1f}"):
-    edge = EDGE["green"]
-    if red is not None and val >= red:
-        edge = EDGE["red"]
-    if orange is not None and val >= orange:
-        edge = EDGE["orange"]
-    html = f"""
-    <div style='position:relative;margin:6px 0;padding:8px 12px 6px 16px;
-                background:{CARD_BG};border-radius:6px;box-shadow:0 0 4px #0007;'>
-      <div style='position:absolute;left:0;top:0;width:8px;height:100%;
-                  background:{edge};border-radius:6px 0 0 6px;'></div>
-      <span style='font-size:16px;color:#ccc;font-weight:600;'>{lbl}</span><br>
-      <span style='font-size:24px;font-weight:700;color:#fafafa;'>
-        {fmt.format(val)}{u}</span>
-    </div>
+# Force dark theme
+st.markdown(
     """
-    st.markdown(html, unsafe_allow_html=True)
+    <style>
+      html, body, [class*="css"]  { background-color: #0e1117 !important; color: #fafafa !important; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-def recalc_minutes():
-    tot = max(state["l1"] + state["l2"], 0.001)
-    state["mins"] = (state["soc"]/100*USABLE_WH)/(tot*1000)*60
+# ─── STATE INITIALIZATION ──────────────────────────────────────────────────────
+if "mqtt_client" not in st.session_state:
+    st.session_state.mqtt_client = None
+if "connected" not in st.session_state:
+    st.session_state.connected = False
+if "state" not in st.session_state:
+    # Holds the latest values from the panel
+    st.session_state.state = {
+        "shore_kw": 0.0,
+        "soc_pct": 0.0,
+        "empty_min": 0.0,
+        "leg1_kw": 0.0,
+        "leg2_kw": 0.0,
+        "delta_leg_kw": 0.0,
+        "inv_temp": 0.0,
+        "bat_temp": 0.0,
+        "last_update": None,
+    }
 
-def log_event(msg):
-    with lock:
-        state["events"].insert(0,(datetime.now(),msg))
-        state["events"] = state["events"][:200]
-
-def update_peak(i,v):
-    with lock:
-        peaks[i] = max(peaks[i], v)
-
-# ───────── MQTT callbacks & loop ─────────────────────────────────────────────
-def on_mqtt_connect(client, userdata, flags, rc):
+# ─── MQTT CALLBACKS ────────────────────────────────────────────────────────────
+def on_connect(client, userdata, flags, rc):
     if rc == 0:
-        state["connected"] = True
-        log_event("✅ MQTT connected!")
-        client.subscribe(f"open/{cfg['akey']}/{cfg['sn']}/status", qos=0)
+        st.session_state.connected = True
+        topic = f"open/{st.session_state.access_key}/{st.session_state.device_sn}/status"
+        client.subscribe(topic)
+        st.session_state.state["last_update"] = datetime.now()
+        log_event("Connected to broker")
     else:
-        state["connected"] = False
-        log_event(f"❌ MQTT connection failed, code={rc}")
+        st.session_state.connected = False
+        log_event(f"Connection failed (rc={rc})")
 
-def on_mqtt_disconnect(client, userdata, rc):
-    state["connected"] = False
-    log_event(f"⚠️ MQTT disconnected (code={rc})")
-
-def on_packet(p):
-    # incoming status payload handling
-    with lock:
-        state.update(
-            soc   = p.get("soc", state["soc"]),
-            grid  = p.get("grid", state["grid"]),
-            shore = p.get("shore", state["shore"]),
-            inv   = p.get("invTemp", state["inv"]),
-            bat   = p.get("batTemp", state["bat"]),
-            l1    = p.get("l1Power", state["l1"]),
-            l2    = p.get("l2Power", state["l2"]),
-            brk   = p.get("breakerStatus", state["brk"]),
-            last  = datetime.now()
-        )
-        recalc_minutes()
-        for i,d in state["brk"].items():
-            update_peak(i, d.get("kw", 0))
-
-def mqtt_loop():
-    if not (cfg.get("akey") and cfg.get("skey") and cfg.get("sn")):
-        log_event("⚠️ Missing credentials – idle")
-        return
-    client = mqtt.Client()
-    client.username_pw_set(cfg["akey"], cfg["skey"])
-    client.tls_set()
-    client.on_connect    = on_mqtt_connect
-    client.on_disconnect = on_mqtt_disconnect
-    client.on_message    = lambda c,u,m: on_packet(json.loads(m.payload)["params"])
+def on_message(client, userdata, msg):
     try:
-        client.connect(cfg["broker"], 8883)
-        client.loop_start()
+        payload = json.loads(msg.payload.decode())
+        params = payload.get("params", {})
+        # map your params into our state keys
+        st.session_state.state.update({
+            "shore_kw": params.get("invChgPow", 0) / 1000.0,
+            "soc_pct": params.get("socSum", 0),
+            "empty_min": params.get("runtime", 0),
+            "leg1_kw": params.get("acOutPwrR", 0) / 1000.0,
+            "leg2_kw": params.get("acOutPwrS", 0) / 1000.0,
+            "delta_leg_kw": abs(params.get("acOutPwrR", 0) - params.get("acOutPwrS", 0)) / 1000.0,
+            "inv_temp": params.get("invTemp", 0),
+            "bat_temp": params.get("batTemp", 0),
+        })
+        st.session_state.state["last_update"] = datetime.now()
     except Exception as e:
-        log_event(f"❌ MQTT connect exception: {e}")
+        log_event(f"Message parse error: {e}")
 
-# ───────── Page header & status banner ──────────────────────────────────────
-st.set_page_config("UFO PDU", layout="wide", initial_sidebar_state="collapsed")
-logo = BASE/"header.png"; pin = BASE/"into the millennium.png"
-if logo.exists() and pin.exists():
-    c1,c2 = st.columns(2, gap="medium")
-    c1.image(str(logo), width=400)
-    c2.image(str(pin),  width=400)
-    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
-elif logo.exists():
-    st.image(str(logo), use_container_width=True)
-    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+def log_event(msg: str):
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    st.session_state.log.append(f"{timestamp}  {msg}")
 
-# ONLINE/OFFLINE banner
-status_col = EDGE["green"] if state["connected"] else EDGE["red"]
+# ─── MQTT CONNECTOR ────────────────────────────────────────────────────────────
+def connect_mqtt():
+    # reset log
+    st.session_state.log = []
+    broker = st.session_state.broker.strip()
+    key    = st.session_state.access_key.strip()
+    secret = st.session_state.secret_key.strip()
+    sn     = st.session_state.device_sn.strip()
+    if not all([broker, key, secret, sn]):
+        log_event("❗ Missing credentials – cannot connect")
+        return
+
+    # stop any old client
+    if st.session_state.mqtt_client:
+        try:
+            st.session_state.mqtt_client.loop_stop()
+            st.session_state.mqtt_client.disconnect()
+        except: pass
+
+    client = mqtt.Client()
+    client.tls_set()  # system CAs
+    client.username_pw_set(key, secret)
+    client.on_connect = on_connect
+    client.on_message = on_message
+
+    try:
+        client.connect(broker, 8883, keepalive=60)
+        client.loop_start()
+        st.session_state.mqtt_client = client
+    except Exception as e:
+        log_event(f"❌ Connect error: {e}")
+        st.session_state.connected = False
+
+# ─── SIDEBAR ───────────────────────────────────────────────────────────────────
+st.sidebar.title("Live mode credentials")
+st.sidebar.text_input("Broker", value="mqtt-e.ecoflow.com", key="broker")
+st.sidebar.text_input("AccessKey", key="access_key")
+st.sidebar.text_input("SecretKey", type="password", key="secret_key")
+st.sidebar.text_input("Device SN", key="device_sn")
+st.sidebar.button("Connect / Update", on_click=connect_mqtt)
+
+# initialize our in-memory log
+if "log" not in st.session_state:
+    st.session_state.log = ["-- Event log --"]
+
+# ─── HEADER ────────────────────────────────────────────────────────────────────
+cols = st.columns([1,2,1])
+with cols[0]:
+    st.image("header.png", use_column_width=True)
+with cols[2]:
+    st.image("into_the_millennium.png", use_column_width=True)
+
+# ─── MAIN TITLE + PANEL STATUS ─────────────────────────────────────────────────
+status_color = "green" if st.session_state.connected else "red"
 st.markdown(
-    f"<p style='text-align:center;color:{status_col};"
-    f"font-size:18px;margin-bottom:12px;'>"
-    f"Panel status: {'ONLINE' if state['connected'] else 'OFFLINE'}"
-    "</p>",
+    f"### UFO PDU STATUS   <span style='color:{status_color};'>**{'ONLINE' if st.session_state.connected else 'OFFLINE'}**</span>",
     unsafe_allow_html=True
 )
 
-st.markdown(
-    "<h1 style='text-align:center;color:#eee;margin-bottom:8px;'>UFO PDU STATUS</h1>"
-    "<style>body{background:#111;} th,td{font-size:14px;}</style>",
-    unsafe_allow_html=True
-)
+# ─── METRIC CARDS ─────────────────────────────────────────────────────────────
+m = st.session_state.state
+metric_cols = st.columns(3)
+metric_cols[0].metric("Shore kW",    f"{m['shore_kw']:.1f}")
+metric_cols[1].metric("SoC %",       f"{m['soc_pct']:.1f}")
+metric_cols[2].metric("Empty min",    f"{m['empty_min']:.1f}")
 
-# ───────── Render UI ────────────────────────────────────────────────────────
-def render():
-    with lock: data = state.copy()
-    left,right = st.columns([1,3], gap="large")
+# ─── BREAKER TABLES ────────────────────────────────────────────────────────────
+table_cols = st.columns(2)
+# Leg 1
+leg1 = {
+    "Name":   ["B1","B3","B5","B7","B9","B11"],
+    "A":      [], "kW": [], "Peak": []
+}
+leg2 = {
+    "Name":   ["B2","B4","B6","B8","B10","B12"],
+    "A":      [], "kW": [], "Peak": []
+}
+# populate from state (or zero)
+for name in leg1["Name"]:
+    # grab a dummy amperage from state if exists, else 0
+    A = m["leg1_kw"] *  AmpPerKW  if "leg1_kw" in m else 0
+    KW = m["leg1_kw"]
+    leg1["A"].append(f"{A:.1f}")
+    leg1["kW"].append(f"{KW:.2f}")
+    leg1["Peak"].append(f"{max(KW, m.get('peak_leg1_kw',0)):.2f}")
+for name in leg2["Name"]:
+    A = m["leg2_kw"] * AmpPerKW
+    KW = m["leg2_kw"]
+    leg2["A"].append(f"{A:.1f}")
+    leg2["kW"].append(f"{KW:.2f}")
+    leg2["Peak"].append(f"{max(KW, m.get('peak_leg2_kw',0)):.2f}")
 
-    # left‐hand cards
-    with left:
-        card("Shore kW", data["grid"])
-        card("SoC %",   data["soc"], fmt="{:.1f}")
-        card("Empty min", data["mins"], fmt="{:.1f}")
-        card("Leg-1 kW", data["l1"], red=LEG_RED, orange=LEG_ORG)
-        card("Leg-2 kW", data["l2"], red=LEG_RED, orange=LEG_ORG)
-        card("Δ Leg kW", abs(data["l1"]-data["l2"]), red=LEG_RED, orange=LEG_ORG)
-        card(f"Inv °F (shut {c2f(INV_SHUT):.0f})", c2f(data["inv"]),
-             red=c2f(INV_RED), orange=c2f(INV_ORG), fmt="{:.0f}")
-        card(f"Bat °F (shut {c2f(BAT_SHUT):.0f})", c2f(data["bat"]),
-             red=c2f(BAT_RED), orange=c2f(BAT_ORG), fmt="{:.0f}")
+with table_cols[0]:
+    st.write("**Leg 1**")
+    st.table(leg1)
+with table_cols[1]:
+    st.write("**Leg 2**")
+    st.table(leg2)
 
-    # breaker tables
-    leg1 = [{**d,"slot":i} for i,d in data["brk"].items() if d.get("leg")==1]
-    leg2 = [{**d,"slot":i} for i,d in data["brk"].items() if d.get("leg")==2]
-    def tbl(rows):
-        df = pd.DataFrame(rows)
-        if df.empty:
-            return st.write("No data")
-        df = df.sort_values("slot")
-        df["Peak"] = df["slot"].map(peaks)
-        df = df[["name","amps","kw","Peak"]]
-        df.columns = ["Name","A","kW","Peak"]
-        def style_row(r):
-            c = EDGE["gray"]
-            if r["kW"] >= BRK_RED:   c = EDGE["red"]
-            elif r["kW"] >= BRK_ORG: c = EDGE["orange"]
-            return [f"background-color:{c}"]*4
-        return (df.style.format({"A":"{:.1f}","kW":"{:.2f}","Peak":"{:.2f}"})
-                    .apply(style_row, axis=1)
-                    .set_table_styles([{"selector":"th","props":"background:#333;color:#ddd;"}]))
+# ─── EVENT LOG ────────────────────────────────────────────────────────────────
+log_col, _ = st.columns([2,1])
+with log_col:
+    st.write("**Event log**")
+    st.text_area("", value="\n".join(st.session_state.log), height=200)
 
-    hb = ""  # no per‐table badge needed now that we have a global status
-    t1,t2 = right.columns(2)
-    t1.markdown("### Leg 1", unsafe_allow_html=True)
-    t1.dataframe(tbl(leg1), height=280, use_container_width=True)
-    t2.markdown("### Leg 2", unsafe_allow_html=True)
-    t2.dataframe(tbl(leg2), height=280, use_container_width=True)
-
-    # top‐breakers chart + event log
-    c1,c2 = right.columns([2,1])
-    if data["brk"]:
-        top = (pd.DataFrame(data["brk"]).T
-               .sort_values("kw", ascending=False).head(5).reset_index())
-        top["col"] = top["kw"].apply(
-            lambda x: EDGE["red"] if x>=BRK_RED
-                      else EDGE["orange"] if x>=BRK_ORG
-                      else EDGE["gray"])
-        chart = (alt.Chart(top).mark_bar().encode(
-            x=alt.X("kw:Q", title="kW", scale=alt.Scale(domain=[0, BRK_RED+0.5])),
-            y=alt.Y("name:N", sort="-x", title=None),
-            color=alt.Color("col:N", scale=None, legend=None)
-        ).properties(height=180))
-        c1.subheader("Top breakers kW")
-        c1.altair_chart(chart, use_container_width=True)
-
-    c2.subheader("Event log")
-    with c2.container(height=180, border=True):
-        for ts,msg in data["events"]:
-            c2.markdown(f"`{ts:%H:%M:%S}` {msg}")
-
-# ───────── Start MQTT thread + loop ─────────────────────────────────────────
-threading.Thread(target=mqtt_loop, daemon=True).start()
-
-while True:
-    render()
-    time.sleep(1)
-    st.rerun()
-    
+# ─── KEEP STREAMLIT RUNNING ────────────────────────────────────────────────────
+# no manual rerun needed—loop is in background via paho.loop_start()
