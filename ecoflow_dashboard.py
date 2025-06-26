@@ -141,7 +141,7 @@ def demo_loop():
         for i, d in brk.items():
             update_peak(i, d["kw"])
         time.sleep(1)
-():
+()
     start = time.time()
     log_event("Demo started")
     while True:
